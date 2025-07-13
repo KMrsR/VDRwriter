@@ -18,7 +18,10 @@ import (
 
 func crc8(s string) byte {
 	var ch byte
-	ch = s[0]
+	if len(s) == 0 {
+		return 0
+	}
+
 	for i := 1; i < len(s); i++ {
 		ch = ch ^ s[i]
 	}
