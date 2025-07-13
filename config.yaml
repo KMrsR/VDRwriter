@@ -1,0 +1,8 @@
+#every this period programm check changes and send changed data via nmea, sec
+pooling_delay: 1
+#delay between pooling all map, sec
+write_all_delay: 600
+#watchdog period, sec
+watchdog_period: 600
+#total count of map registers
+map_size: 1500

@@ -7,225 +7,179 @@ import (
 	"math"
 	"net"
 	"os"
-	"os/exec"
-	"runtime"
-	"strconv"
 	"sync"
 	"time"
 
 	"github.com/tbrandon/mbserver"
+	"gopkg.in/yaml.v3"
 )
 
+// XOR всех байтов строки
 func crc8(s string) byte {
 	var ch byte
-	if len(s) == 0 {
-		return 0
-	}
-
-	for i := 1; i < len(s); i++ {
-		ch = ch ^ s[i]
+	for i := 0; i < len(s); i++ {
+		ch ^= s[i]
 	}
 	return ch
 }
 
+// формируем строку в формате NMEA 0183
 func nmea0183(data string) []byte {
-	ss := make([]byte, 0, 100)
-	ss = append(ss, []byte("$")...)
-	ss = append(ss, []byte(data)...)
-	ss = append(ss, []byte("*")...)
-	ss = append(ss, []byte(strconv.FormatInt(int64(crc8(data)), 16))...)
-	ss = append(ss, []byte("\r\n")...)
-	return ss
+	checksum := crc8(data)
+	s := fmt.Sprintf("$%s*%02X\r\n", data, checksum)
+	return []byte(s)
 }
 
+// собираем float из двух регистров
 func Float32frombytes(a, b uint16) string {
-	var sl []byte
-	sl1 := make([]byte, 2)
-	sl2 := make([]byte, 2)
-	binary.BigEndian.PutUint16(sl1, a)
-	binary.BigEndian.PutUint16(sl2, b)
-	sl = append(sl, sl1...)
-	sl = append(sl, sl2...)
-	bits := binary.BigEndian.Uint32(sl)
+	buf := make([]byte, 4)
+	binary.BigEndian.PutUint16(buf[0:2], a)
+	binary.BigEndian.PutUint16(buf[2:4], b)
+	bits := binary.BigEndian.Uint32(buf)
 	float := math.Float32frombits(bits)
-	return fmt.Sprintf("%8.2f", float)
+	return fmt.Sprintf("%.2f", float)
 }
 
-func iaswd(q net.Conn, mutex *sync.Mutex) {
-	for {
+// ватчдог
+func iaswd(q net.Conn, connMutex *sync.Mutex, cfg *Config) {
+	ticker := time.NewTicker(time.Duration(cfg.WatchdogPeriod) * time.Second)
+	defer ticker.Stop()
 
-		mutex.Lock()
-		wdStr := "IAS WD"
-		_, err := q.Write(nmea0183(wdStr))
-		mutex.Unlock()
+	for range ticker.C {
+		msg := nmea0183("IAS WD")
+
+		connMutex.Lock()
+		_, err := q.Write(msg)
+		connMutex.Unlock()
 
 		if err != nil {
-			log.Println("IAS watchdog ", err.Error())
-			os.Exit(1)
+			log.Println("IAS watchdog write failed:", err)
+			os.Exit(1) // Или передай в канал, если хочешь корректный shutdown
 		}
-		time.Sleep(8 * time.Second)
 	}
 }
 
-func FLAGs(conn net.Conn, serv *mbserver.Server, mutex *sync.Mutex) {
-	oldTable := make([]uint16, 200)
-	for {
-		mutex.Lock()
-		for i := 0; i < 195; i++ {
-			if serv.HoldingRegisters[i+299] != oldTable[i] {
-				w := FALAGA[i] + strconv.Itoa(int(serv.HoldingRegisters[i+299]))
-				_, err := conn.Write(nmea0183(w))
-				if err != nil {
-					log.Println("Write to server failed:", err.Error())
-					os.Exit(1)
-				}
-				log.Println("transmitted : " + w)
-				oldTable[i] = serv.HoldingRegisters[i+299]
-				time.Sleep(10 * time.Millisecond)
-			}
-		}
-		mutex.Unlock()
-		time.Sleep(1 * time.Second)
+// загрузка конфига из yaml
+func loadConfig(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
 	}
+	var cfg Config
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
 }
-func SPs(conn net.Conn, serv *mbserver.Server, mutex *sync.Mutex) {
 
-	oldTable := make([]uint16, 250)
-	for {
-		mutex.Lock()
-		for i := 0; i < 249; i++ {
-			if serv.HoldingRegisters[i] != oldTable[i] {
-				w := StatusPoint[i] + strconv.Itoa(int(serv.HoldingRegisters[i]))
-				_, err := conn.Write(nmea0183(w))
-				if err != nil {
-					log.Println("Write to server failed:", err.Error())
-					os.Exit(1)
-				}
-				log.Println("transmitted : " + w)
-				oldTable[i] = serv.HoldingRegisters[i]
-				time.Sleep(10 * time.Millisecond)
-			}
-		}
-		mutex.Unlock()
-		time.Sleep(1 * time.Second)
+func loadTagConfig(path string) (*TagConfig, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
 	}
-}
-func APs(conn net.Conn, serv *mbserver.Server, mutex *sync.Mutex) {
-	oldTable := make([]uint16, 350)
-	for {
-		mutex.Lock()
-		for i := 0; i < 350; i += 2 {
-			if serv.HoldingRegisters[i+598] != oldTable[i] || serv.HoldingRegisters[i+599] != oldTable[i+1] {
-				w := AnalogPoint[i/2] + Float32frombytes(serv.HoldingRegisters[i+598], serv.HoldingRegisters[i+599])
-				_, err := conn.Write(nmea0183(w))
-				if err != nil {
-					log.Println("Write to server failed:", err.Error())
-					os.Exit(1)
-				}
-				log.Println("transmitted : " + w)
-				oldTable[i] = serv.HoldingRegisters[i+598]
-				oldTable[i+1] = serv.HoldingRegisters[i+599]
-				time.Sleep(10 * time.Millisecond)
-			}
-		}
-		mutex.Unlock()
-		time.Sleep(1 * time.Second)
+	var cfg TagConfig
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, err
 	}
+	return &cfg, nil
 }
-func DACAs(conn net.Conn, serv *mbserver.Server, mutex *sync.Mutex) {
-	oldTable := make([]uint16, 250)
-	for {
-		mutex.Lock()
-		for i := 0; i < 249; i += 2 {
-			if serv.HoldingRegisters[i+1198] != oldTable[i] || serv.HoldingRegisters[i+1199] != oldTable[i+1] {
-				w := DACA[i/2] + Float32frombytes(serv.HoldingRegisters[i+1198], serv.HoldingRegisters[i+1199])
-				_, err := conn.Write(nmea0183(w))
-				if err != nil {
-					log.Println("Write to server failed:", err.Error())
-					os.Exit(1)
-				}
-				log.Println("transmitted : " + w)
-				oldTable[i] = serv.HoldingRegisters[i+1198]
-				oldTable[i+1] = serv.HoldingRegisters[i+1199]
-				time.Sleep(10 * time.Millisecond)
-			}
-		}
-		mutex.Unlock()
-		time.Sleep(1 * time.Second)
+
+// извлекаем данные из регистров в зависимости от типа данных
+func extractValue(data []uint16, addr uint16, typ string) interface{} {
+	switch typ {
+	case "uint16":
+		return data[addr]
+	case "int16":
+		return int16(data[addr])
+	case "float32":
+		bits := uint32(data[addr])<<16 | uint32(data[addr+1])
+		return math.Float32frombits(bits)
+	default:
+		return nil
 	}
 }
 
-func WriteAll(conn net.Conn, serv *mbserver.Server, mutex *sync.Mutex) {
-	for {
-		ClearScreen()
-		mutex.Lock()
-		log.Println("start to transmit All map")
-		for i := 0; i < 195; i++ {
-			w := FALAGA[i] + strconv.Itoa(int(serv.HoldingRegisters[i+299]))
-			_, err := conn.Write(nmea0183(w))
-			// fmt.Println("flaga area: ", w)
+// пишем все данные из карты в nmea периодично
+func WriteAll(conn net.Conn, serv *mbserver.Server, regMutex *sync.Mutex, connMutex *sync.Mutex, tagCfg *TagConfig, cfg *Config) {
+	ticker := time.NewTicker(time.Duration(cfg.WriteAllDelay) * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		log.Println("Write all map: start")
+		for _, tag := range tagCfg.Tags {
+			current := make([]uint16, cfg.MapSize)
+			// защищаем чтение карты мюьтексом
+			regMutex.Lock()
+			copy(current, serv.HoldingRegisters[:cfg.MapSize])
+			regMutex.Unlock()
+
+			value := extractValue(current, tag.Register, tag.Type)
+			msg := fmt.Sprintf("ias,%s,%v", tag.Name, value)
+			nmea := nmea0183(msg)
+			// защищаем запись в терминальный сервер
+			connMutex.Lock()
+			_, err := conn.Write(nmea)
+			connMutex.Unlock()
+
 			if err != nil {
-				log.Println("Write to server failed:", err.Error())
-				os.Exit(1)
+				log.Printf("Write error: %v", err)
+				return
 			}
-			time.Sleep(time.Duration(cnfg.PoolingDelay) * time.Millisecond)
 		}
-		// time.Sleep(1 * time.Second)
-
-		for i := 0; i < 249; i++ {
-			w := StatusPoint[i] + strconv.Itoa(int(serv.HoldingRegisters[i]))
-			_, err := conn.Write(nmea0183(w))
-			// fmt.Println("SP area: ", w)
-			if err != nil {
-				log.Println("Write to server failed:", err.Error())
-				os.Exit(1)
-			}
-			time.Sleep(time.Duration(cnfg.PoolingDelay) * time.Millisecond)
-		}
-		// time.Sleep(1 * time.Second)
-
-		for i := 0; i < 346; i += 2 {
-			w := AnalogPoint[i/2] + Float32frombytes(serv.HoldingRegisters[i+598], serv.HoldingRegisters[i+599])
-			_, err := conn.Write(nmea0183(w))
-			// fmt.Println("AP area: ", w)
-			if err != nil {
-				log.Println("Write to server failed:", err.Error())
-				os.Exit(1)
-			}
-			time.Sleep(time.Duration(cnfg.PoolingDelay) * time.Millisecond)
-		}
-		// time.Sleep(1 * time.Second)
-
-		for i := 0; i < 248; i += 2 {
-			w := DACA[i/2] + Float32frombytes(serv.HoldingRegisters[i+1198], serv.HoldingRegisters[i+1199])
-			_, err := conn.Write(nmea0183(w))
-			// fmt.Println("flaga DACA: ", w)
-			if err != nil {
-				log.Println("Write to server failed:", err.Error())
-				os.Exit(1)
-			}
-			time.Sleep(time.Duration(cnfg.PoolingDelay) * time.Millisecond)
-		}
-		log.Println("transmitted All map")
-		mutex.Unlock()
-		time.Sleep(time.Duration(cnfg.WriteAllDelay) * time.Second)
-
+		log.Println("Write all map: finished")
 	}
-
 }
 
-func ClearScreen() {
+// смотрим изменения и кидаем в nmea
+func MonitorTags(conn net.Conn, serv *mbserver.Server, regMutex *sync.Mutex, connMutex *sync.Mutex, tagCfg *TagConfig, cfg *Config) {
+	// создаем массив для старых значений и тикер
+	old := make([]uint16, cfg.MapSize)
+	ticker := time.NewTicker(time.Duration(cfg.PoolingDelay) * time.Second)
+	defer ticker.Stop()
+	// итерируемся по тикеру
+	for range ticker.C {
+		current := make([]uint16, cfg.MapSize)
+		// защищаем чтение карты мюьтексом
+		regMutex.Lock()
+		copy(current, serv.HoldingRegisters[:cfg.MapSize])
+		regMutex.Unlock()
 
-	if runtime.GOOS == "windows" {
-		cmd := exec.Command("cmd", "/c", "cls")
-		cmd.Stdout = os.Stdout
-		cmd.Run()
-	} else {
-		cmd := exec.Command("clear")
-		cmd.Stdout = os.Stdout
-		cmd.Run()
+		for _, tag := range tagCfg.Tags {
+			length := tag.Length
+			if length == 0 {
+				length = 1
+			}
+			// чекаем измененные значения
+			changed := false
+			for i := uint16(0); i < length; i++ {
+				if current[tag.Register+i] != old[tag.Register+i] {
+					changed = true
+					break
+				}
+			}
+			// если данные изменились
+			if changed {
+				value := extractValue(current, tag.Register, tag.Type)
+				msg := fmt.Sprintf("ias,%s,%v", tag.Name, value)
+				nmea := nmea0183(msg)
+				// защищаем запись в терминальный сервер
+				connMutex.Lock()
+				_, err := conn.Write(nmea)
+				connMutex.Unlock()
+
+				if err != nil {
+					log.Printf("Write error: %v", err)
+					return
+				}
+
+				log.Printf("Sent NMEA: %s", msg)
+
+				// обновляем old
+				for i := uint16(0); i < length; i++ {
+					old[tag.Register+i] = current[tag.Register+i]
+				}
+
+				time.Sleep(5 * time.Millisecond)
+			}
+		}
 	}
-	fmt.Println("\033[32mVDR: converter ModbusTCP to NMEA0183\033[0m")       //зеленый
-	fmt.Println("\033[32mModbusTCP server opened on localhost:502\033[0m\n") //зеленый
-
 }
