@@ -3,6 +3,10 @@ pooling_delay: 1
 #delay between pooling all map, sec
 write_all_delay: 600
 #watchdog period, sec
-watchdog_period: 600
+watchdog_period: 60
 #total count of map registers
 map_size: 1500
+#choose role depending on server
+role: A
+#register in which the role is determined (1-A,2-B)
+active_control_reg: 1450

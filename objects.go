@@ -1,12 +1,12 @@
 package main
 
 type Config struct {
-	PoolingDelay   int `yaml:"pooling_delay"`
-	WriteAllDelay  int `yaml:"write_all_delay"`
-	WatchdogPeriod int `yaml:"watchdog_period"`
-	// FLAGsStartReg  int `yaml:"FLAGs_start_reg"`
-	// FLAGsCntReg    int `yaml:"FLAGs_count_reg"`
-	MapSize int `yaml:"map_size"`
+	PoolingDelay     int    `yaml:"pooling_delay"`
+	WriteAllDelay    int    `yaml:"write_all_delay"`
+	WatchdogPeriod   int    `yaml:"watchdog_period"`
+	MapSize          int    `yaml:"map_size"`
+	Role             string `yaml:"role"`               // "A" или "B"
+	ActiveControlReg uint16 `yaml:"active_control_reg"` // например 1450
 }
 
 type Tag struct {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"log"
@@ -41,20 +42,35 @@ func Float32frombytes(a, b uint16) string {
 }
 
 // ватчдог
-func iaswd(q net.Conn, connMutex *sync.Mutex, cfg *Config) {
+func iaswd(ctx context.Context, conn net.Conn, serv *mbserver.Server, regMutex *sync.Mutex, connMutex *sync.Mutex, tagCfg *TagConfig, cfg *Config) {
 	ticker := time.NewTicker(time.Duration(cfg.WatchdogPeriod) * time.Second)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		msg := nmea0183("IAS WD")
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("IAS watchdog: shutting down")
+			return
+		case <-ticker.C:
+			// лочимся и читаем регистр определения активности
+			regMutex.Lock()
+			regValue := serv.HoldingRegisters[cfg.ActiveControlReg]
+			regMutex.Unlock()
+			// смотри на значение регистра определения активности и определямся можем писать или нет
+			if !isWriterActive(cfg.Role, regValue) {
+				continue // пропускаем итерацию — не активная копия
+			}
+			//мы активны и идем дальше
+			msg := nmea0183("IAS WD")
 
-		connMutex.Lock()
-		_, err := q.Write(msg)
-		connMutex.Unlock()
+			connMutex.Lock()
+			_, err := conn.Write(msg)
+			connMutex.Unlock()
 
-		if err != nil {
-			log.Println("IAS watchdog write failed:", err)
-			os.Exit(1) // Или передай в канал, если хочешь корректный shutdown
+			if err != nil {
+				log.Println("IAS watchdog write failed:", err)
+				os.Exit(1) // Или передай в канал, если хочешь корректный shutdown
+			}
 		}
 	}
 }
@@ -99,65 +115,56 @@ func extractValue(data []uint16, addr uint16, typ string) interface{} {
 	}
 }
 
+// проверка активности копии прграммы
+func isWriterActive(role string, reg uint16) bool {
+	switch role {
+	case "A":
+		return reg == 1
+	case "B":
+		return reg == 2
+	default:
+		return false
+	}
+}
+
 // пишем все данные из карты в nmea периодично
-func WriteAll(conn net.Conn, serv *mbserver.Server, regMutex *sync.Mutex, connMutex *sync.Mutex, tagCfg *TagConfig, cfg *Config) {
+func WriteAll(ctx context.Context, conn net.Conn, serv *mbserver.Server, regMutex *sync.Mutex, connMutex *sync.Mutex, tagCfg *TagConfig, cfg *Config) {
+	current := make([]uint16, cfg.MapSize)
+	old := make([]uint16, cfg.MapSize)
 	ticker := time.NewTicker(time.Duration(cfg.WriteAllDelay) * time.Second)
 	defer ticker.Stop()
-	for range ticker.C {
-		log.Println("Write all map: start")
-		for _, tag := range tagCfg.Tags {
-			current := make([]uint16, cfg.MapSize)
+	wasActive := false
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			// лочимся и читаем регистр определения активности
+			regMutex.Lock()
+			regValue := serv.HoldingRegisters[cfg.ActiveControlReg]
+			regMutex.Unlock()
+			// смотри на значение регистра определения активности и определямся можем писать или нет
+			isActive := isWriterActive(cfg.Role, regValue)
+			if !isActive {
+				wasActive = false
+				continue // пропускаем итерацию — не активная копия
+			}
+			// вход в активное состояние
+			if isActive && !wasActive {
+				regMutex.Lock()
+				copy(current, serv.HoldingRegisters[:cfg.MapSize])
+				regMutex.Unlock()
+				copy(old, current)
+				wasActive = true
+				continue
+			}
+			log.Println("Write all map: start")
 			// защищаем чтение карты мюьтексом
 			regMutex.Lock()
 			copy(current, serv.HoldingRegisters[:cfg.MapSize])
 			regMutex.Unlock()
+			for _, tag := range tagCfg.Tags {
 
-			value := extractValue(current, tag.Register, tag.Type)
-			msg := fmt.Sprintf("ias,%s,%v", tag.Name, value)
-			nmea := nmea0183(msg)
-			// защищаем запись в терминальный сервер
-			connMutex.Lock()
-			_, err := conn.Write(nmea)
-			connMutex.Unlock()
-
-			if err != nil {
-				log.Printf("Write error: %v", err)
-				return
-			}
-		}
-		log.Println("Write all map: finished")
-	}
-}
-
-// смотрим изменения и кидаем в nmea
-func MonitorTags(conn net.Conn, serv *mbserver.Server, regMutex *sync.Mutex, connMutex *sync.Mutex, tagCfg *TagConfig, cfg *Config) {
-	// создаем массив для старых значений и тикер
-	old := make([]uint16, cfg.MapSize)
-	ticker := time.NewTicker(time.Duration(cfg.PoolingDelay) * time.Second)
-	defer ticker.Stop()
-	// итерируемся по тикеру
-	for range ticker.C {
-		current := make([]uint16, cfg.MapSize)
-		// защищаем чтение карты мюьтексом
-		regMutex.Lock()
-		copy(current, serv.HoldingRegisters[:cfg.MapSize])
-		regMutex.Unlock()
-
-		for _, tag := range tagCfg.Tags {
-			length := tag.Length
-			if length == 0 {
-				length = 1
-			}
-			// чекаем измененные значения
-			changed := false
-			for i := uint16(0); i < length; i++ {
-				if current[tag.Register+i] != old[tag.Register+i] {
-					changed = true
-					break
-				}
-			}
-			// если данные изменились
-			if changed {
 				value := extractValue(current, tag.Register, tag.Type)
 				msg := fmt.Sprintf("ias,%s,%v", tag.Name, value)
 				nmea := nmea0183(msg)
@@ -170,15 +177,90 @@ func MonitorTags(conn net.Conn, serv *mbserver.Server, regMutex *sync.Mutex, con
 					log.Printf("Write error: %v", err)
 					return
 				}
+			}
+			log.Println("All map writed")
+		}
+	}
+}
 
-				log.Printf("Sent NMEA: %s", msg)
+// смотрим изменения и кидаем в nmea
+func MonitorTags(ctx context.Context, conn net.Conn, serv *mbserver.Server, regMutex *sync.Mutex, connMutex *sync.Mutex, tagCfg *TagConfig, cfg *Config) {
+	// создаем массив для старых значений и тикер
+	old := make([]uint16, cfg.MapSize)
+	current := make([]uint16, cfg.MapSize)
+	ticker := time.NewTicker(time.Duration(cfg.PoolingDelay) * time.Second)
+	defer ticker.Stop()
+	wasActive := false
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("MonitorTags: shutting down")
+			return
+		case <-ticker.C:
+			// лочимся и читаем регистр определения активности
+			regMutex.Lock()
+			regValue := serv.HoldingRegisters[cfg.ActiveControlReg]
+			regMutex.Unlock()
+			// смотри на значение регистра определения активности и определямся можем писать или нет
+			isActive := isWriterActive(cfg.Role, regValue)
+			if !isActive {
+				wasActive = false
+				continue // пропускаем итерацию — не активная копия
+			}
+			// вход в активное состояние
+			if isActive && !wasActive {
+				regMutex.Lock()
+				copy(current, serv.HoldingRegisters[:cfg.MapSize])
+				regMutex.Unlock()
+				copy(old, current)
+				log.Printf("Role %s became active — syncing state", cfg.Role)
+				wasActive = true
+				continue
+			}
+			// если мы активный клиент то идем на запись
+			// защищаем чтение карты мюьтексом
+			regMutex.Lock()
+			copy(current, serv.HoldingRegisters[:cfg.MapSize])
+			regMutex.Unlock()
 
-				// обновляем old
-				for i := uint16(0); i < length; i++ {
-					old[tag.Register+i] = current[tag.Register+i]
+			for _, tag := range tagCfg.Tags {
+				length := tag.Length
+				if length == 0 {
+					log.Printf("Warning: tag %s has zero length", tag.Name)
+					continue
 				}
+				// чекаем измененные значения
+				changed := false
+				for i := uint16(0); i < length; i++ {
+					if current[tag.Register+i] != old[tag.Register+i] {
+						changed = true
+						break
+					}
+				}
+				// если данные изменились
+				if changed {
+					value := extractValue(current, tag.Register, tag.Type)
+					msg := fmt.Sprintf("ias,%s,%v", tag.Name, value)
+					nmea := nmea0183(msg)
+					// защищаем запись в терминальный сервер
+					connMutex.Lock()
+					_, err := conn.Write(nmea)
+					connMutex.Unlock()
 
-				time.Sleep(5 * time.Millisecond)
+					if err != nil {
+						log.Printf("Write error: %v", err)
+						return
+					}
+
+					log.Printf("Sent NMEA: %s", msg)
+
+					// обновляем old
+					for i := uint16(0); i < length; i++ {
+						old[tag.Register+i] = current[tag.Register+i]
+					}
+
+					time.Sleep(5 * time.Millisecond)
+				}
 			}
 		}
 	}
