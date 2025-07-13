@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"math"
 	"net"
 	"os"
+	"runtime"
 	"sync"
 	"time"
 
@@ -158,7 +160,6 @@ func WriteAll(ctx context.Context, conn net.Conn, serv *mbserver.Server, regMute
 				wasActive = true
 				continue
 			}
-			log.Println("Write all map: start")
 			// защищаем чтение карты мюьтексом
 			regMutex.Lock()
 			copy(current, serv.HoldingRegisters[:cfg.MapSize])
@@ -252,7 +253,7 @@ func MonitorTags(ctx context.Context, conn net.Conn, serv *mbserver.Server, regM
 						return
 					}
 
-					log.Printf("Sent NMEA: %s", msg)
+					// log.Printf("Sent NMEA: %s", msg)
 
 					// обновляем old
 					for i := uint16(0); i < length; i++ {
@@ -263,5 +264,12 @@ func MonitorTags(ctx context.Context, conn net.Conn, serv *mbserver.Server, regM
 				}
 			}
 		}
+	}
+}
+
+func waitForExitOnWindows() {
+	if runtime.GOOS == "windows" {
+		fmt.Println("Press Enter to exit...")
+		bufio.NewReader(os.Stdin).ReadBytes('\n')
 	}
 }

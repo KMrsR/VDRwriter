@@ -1,9 +1,7 @@
 package main
 
 import (
-	"bufio"
 	"context"
-	"fmt"
 	"log"
 	"net"
 	"os"
@@ -17,8 +15,17 @@ import (
 func main() {
 	var regMutex sync.Mutex  // определяем мьютекс защиты регистров
 	var connMutex sync.Mutex // определяем мьютекс защиты соеднинения с терминальным сервером
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	//--------------------------------------------------------------------
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+	go func() {
+		sig := <-sigChan
+		log.Printf("Received OS signal: %s", sig)
+		cancel()
+	}()
 	//--------------------------------------------------------------------
 	// читаем конфиги
 	cfg, err := loadConfig("./config.yaml")
@@ -31,47 +38,32 @@ func main() {
 	}
 	//--------------------------------------------------------------------
 	//Modbus TCP server
-	fmt.Println("opening ModbusTCP server on localhost:502")
 	serv := mbserver.NewServer()
-	err = serv.ListenTCP(":502")
+	err = serv.ListenTCP(cfg.MBTCPip)
 	if err != nil {
-		log.Printf("%v\nPress 'q' to quit\n", err)
-		scanner := bufio.NewScanner(os.Stdin)
-		for scanner.Scan() {
-			exit := scanner.Text()
-			if exit == "q" {
-				os.Exit(1)
-			} else {
-				fmt.Println("Press 'q' to quit")
-			}
-		}
+		log.Printf("Failed to open ModbusTCP server on %s: %v", cfg.MBTCPip, err)
+		waitForExitOnWindows()
+		os.Exit(1)
 	}
-	log.Println("ModbusTCP server opened")
+	log.Printf("ModbusTCP server on %s started", cfg.MBTCPip)
 	//--------------------------------------------------------------------
 	//opening TCP client
-	log.Println("connecting to Terminal server on 10.1.2.65:8007")
-	conn, err := net.Dial("tcp", "10.1.2.65:8007")
+	conn, err := net.Dial("tcp", cfg.ETOSip)
 	if err != nil {
-		log.Printf("%v\nPress 'q' to quit\n", err)
-		scanner := bufio.NewScanner(os.Stdin)
-		for scanner.Scan() {
-			exit := scanner.Text()
-			if exit == "q" {
-				os.Exit(1)
-			} else {
-				fmt.Println("Press 'q' to quit")
-			}
-		}
+		log.Printf("Failed to connect to Terminal server %s: %v", cfg.ETOSip, err)
+		waitForExitOnWindows()
+		os.Exit(1)
 	}
-	log.Println("connection to Terminal server opened")
+	log.Printf("connected to Terminal server on %s", cfg.ETOSip)
 	//--------------------------------------------------------------------
 	go MonitorTags(ctx, conn, serv, &regMutex, &connMutex, tagCfg, cfg)
 	go WriteAll(ctx, conn, serv, &regMutex, &connMutex, tagCfg, cfg)
 	go iaswd(ctx, conn, serv, &regMutex, &connMutex, tagCfg, cfg)
 	//--------------------------------------------------------------------
 	<-ctx.Done()
-	log.Println("Shutdown signal received")
-	conn.Close()
-	serv.Close()
+	defer conn.Close()
+	defer serv.Close()
+	log.Println("Shutdown signal received, closing resources...")
 	//--------------------------------------------------------------------
+	waitForExitOnWindows()
 }

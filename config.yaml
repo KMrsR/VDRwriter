@@ -10,3 +10,7 @@ map_size: 1500
 role: A
 #register in which the role is determined (1-A,2-B)
 active_control_reg: 1450
+#modbus TCP server ip address & port
+MB_TCP_IP_port: localhost:502
+#ETOS terminal server ip address & port
+ETOS_IP_port: 10.1.2.65:8007

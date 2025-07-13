@@ -1,0 +1,18 @@
+Встраивание иконки в exe-файл на Windows
+Чтобы скомпилировать .exe с иконкой:
+1. Установи утилиту rsrc
+go install github.com/akavel/rsrc@latest
+Убедись, что $GOPATH/bin в PATH.
+
+2. Подготовь иконку
+Сохрани свою иконку как icon.ico в корне проекта (размер 64x64 или 256x256).
+
+3. Сгенерируй .syso
+ & "$env:GOPATH\\bin\\rsrc.exe" -ico icon.ico -o rsrc.syso
+Файл rsrc.syso должен лежать рядом с main.go. Go подхватит его при сборке автоматически.
+
+4. Сборка
+
+go build -o VDRwriter.exe
+
+Если хочешь убрать консольное окно:

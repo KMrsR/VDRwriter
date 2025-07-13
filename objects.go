@@ -7,6 +7,8 @@ type Config struct {
 	MapSize          int    `yaml:"map_size"`
 	Role             string `yaml:"role"`               // "A" или "B"
 	ActiveControlReg uint16 `yaml:"active_control_reg"` // например 1450
+	MBTCPip          string `yaml:"MB_TCP_IP_port"`     // адрес на котором поднимается модбас ТСР сервер
+	ETOSip           string `yaml:"ETOS_IP_port"`       // адрес терминального сервера с портом
 }
 
 type Tag struct {
